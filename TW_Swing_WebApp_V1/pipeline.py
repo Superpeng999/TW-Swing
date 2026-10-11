@@ -32,20 +32,55 @@ def init(c):
     CREATE TABLE IF NOT EXISTS snapshots (run_at TEXT,symbol TEXT,score REAL,level TEXT,coverage TEXT,large_pct REAL,retail_pct REAL,foreign5 REAL,trust5 REAL,reason TEXT,PRIMARY KEY(run_at,symbol));''')
 
 def load_tdcc(c):
-    data=get_json(TDCC)
-    if isinstance(data,dict):data=next((v for v in data.values() if isinstance(v,list)),[])
-    if not isinstance(data,list) or not data:raise ValueError('TDCC response contains no records')
-    rows=[]
+    """Download TDCC 1-5; accept official Chinese/English column variants.
+
+    Fail visibly if no valid rows. Do not turn incomplete data into scores.
+    """
+    data = get_json(TDCC)
+    if isinstance(data, dict):
+        data = next((v for v in data.values() if isinstance(v, list)), [])
+    if not isinstance(data, list) or not data:
+        raise ValueError('TDCC response contains no records')
+
+    def tdcc_value(row, *aliases):
+        # Both 占 and 佔 appear in published field descriptions.
+        candidates = {norm(str(k).replace('佔', '占')): v for k, v in row.items()}
+        for alias in aliases:
+            key = norm(alias.replace('佔', '占'))
+            if key in candidates:
+                return candidates[key]
+        return None
+
+    rows = []
+    skipped = 0
+    now = dt.datetime.now().isoformat(timespec='seconds')
     for row in data:
-        if not isinstance(row,dict):continue
-        d=str(select(row,'資料日期','date') or '').strip().replace('-','')
-        sym=str(select(row,'證券代號','securities code') or '').strip()
-        tier=num(select(row,'持股分級','securities holding range'))
-        pct=num(select(row,'占集保庫存數比例%','占集保庫存數比例','percentage of centrally deposited securities'))
-        if not(d.isdigit() and len(d)==8 and sym and tier is not None and pct is not None):continue
-        rows.append((d,sym,int(tier),num(select(row,'人數','number of holders')),num(select(row,'股數','number of shares/units')),pct,TDCC,dt.datetime.now().isoformat(timespec='seconds')))
-    if not rows:raise ValueError('TDCC schema changed: no valid rows')
-    c.executemany('INSERT OR REPLACE INTO tdcc VALUES(?,?,?,?,?,?,?,?)',rows)
+        if not isinstance(row, dict):
+            skipped += 1
+            continue
+        raw_date = str(tdcc_value(row, '資料日期', 'Date') or '').strip()
+        d = re.sub(r'[^0-9]', '', raw_date)
+        sym = str(tdcc_value(row, '證券代號', 'Securities Code', 'SecuritiesCode') or '').strip()
+        tier = num(tdcc_value(row, '持股分級', 'Securities Holding Range', 'SecuritiesHoldingRange'))
+        pct = num(tdcc_value(row,
+            '占集保庫存數比例%', '佔集保庫存數比例%', '占集保庫存數比例',
+            'Percentage of Centrally Deposited Securities',
+            'PercentageOfCentrallyDepositedSecurities',
+            'Percentage of Centrally Deposited Securities (%)'))
+        holders = num(tdcc_value(row, '人數', 'Number of Holders', 'NumberOfHolders'))
+        shares = num(tdcc_value(row, '股數', 'Number of Shares/Units', 'NumberOfSharesUnits', 'Number of Shares'))
+        if not (len(d) == 8 and d.isdigit() and re.fullmatch(r'[0-9A-Za-z]{4,6}', sym)
+                and tier is not None and 1 <= tier <= 17 and pct is not None and 0 <= pct <= 100):
+            skipped += 1
+            continue
+        # Tier 16 is adjustment, tier 17 is total. The scoring code uses 1..15.
+        rows.append((d, sym, int(tier), holders, shares, pct, TDCC, now))
+    if not rows:
+        example_keys = list(data[0].keys()) if isinstance(data[0], dict) else []
+        raise ValueError('TDCC: no valid rows; sample field names=' + repr(example_keys)
+                         + '; examined=' + str(len(data)))
+    c.executemany('INSERT OR REPLACE INTO tdcc VALUES(?,?,?,?,?,?,?,?)', rows)
+    print('TDCC parsed rows:', len(rows), 'skipped:', skipped, 'sample keys:', list(data[0].keys()))
     return len(rows)
 
 def load_twse(c,d):
