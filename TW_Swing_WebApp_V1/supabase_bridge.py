@@ -13,7 +13,12 @@ KEY=os.environ.get('SUPABASE_SECRET_KEY','')
 if not URL.startswith('https://') or not KEY:
     raise SystemExit('Missing SUPABASE_URL or SUPABASE_SECRET_KEY (configure GitHub Actions secrets).')
 SESSION=requests.Session()
-SESSION.headers.update({'apikey':KEY,'Authorization':'Bearer '+KEY,'Content-Type':'application/json'})
+# Supabase modern sb_secret_ keys are API keys, not JWT bearer tokens.
+# Legacy service_role keys are JWTs and can still use Authorization.
+headers = {'apikey': KEY, 'Content-Type': 'application/json'}
+if not KEY.startswith(('sb_secret_', 'sb_publishable_')):
+    headers['Authorization'] = 'Bearer ' + KEY
+SESSION.headers.update(headers)
 TABLES={
  'tdcc_holdings':('tdcc','d,symbol,tier,holders,shares,pct,source,loaded_at','data_date,symbol,tier,holders,shares,pct,source,loaded_at','data_date,symbol,tier'),
  'institutional_flows':('institutions','d,symbol,market,name,foreign_net,trust_net,source,loaded_at','data_date,symbol,market,stock_name,foreign_net,trust_net,source,loaded_at','data_date,symbol,market'),
