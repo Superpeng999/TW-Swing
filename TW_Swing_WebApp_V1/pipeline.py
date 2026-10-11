@@ -17,7 +17,7 @@ def get_json(url,params=None):
 def num(x):
     try:return float(str(x).replace(',','').replace('%','').strip())
     except (TypeError,ValueError):return None
-def norm(s):return re.sub(r'[\s\u3000()（）%％、/·.-]','',str(s)).lower()
+def norm(s):return re.sub(r'[\s\u3000\ufeff\u200b()（）%％、/·.-]','',str(s)).lower()
 def select(row,*names):
     n={norm(k):v for k,v in row.items()}
     for name in names:
