@@ -2,7 +2,7 @@
 Usage: python supabase_bridge.py pull|push
 Credentials are read ONLY from SUPABASE_URL and SUPABASE_SECRET_KEY env vars.
 """
-import os,sys,sqlite3,datetime as dt,time
+import os,sys,sqlite3,datetime as dt,time,json,re
 from pathlib import Path
 import requests
 
@@ -26,17 +26,39 @@ TABLES={
  'update_runs':('runs','run_at,tdcc_count,twse_count,notes','run_at,tdcc_count,institution_count,notes','run_at')
 }
 
+def _safe_api_error(response):
+    """Only show known error fields, never request headers, URLs or credentials."""
+    try:
+        body = response.json()
+    except ValueError:
+        body = {}
+    permitted = ('code', 'error_code', 'message', 'hint', 'details', 'error', 'description')
+    if isinstance(body, dict):
+        fields = {k: str(body[k])[:300] for k in permitted if k in body and body[k] is not None}
+    else:
+        fields = {}
+    # In case a remote diagnostic echoes a credential, scrub it before printing.
+    rendered = json.dumps(fields, ensure_ascii=False)
+    rendered = re.sub(r'sb_(?:secret|publishable)_[A-Za-z0-9_-]+', '[REDACTED_KEY]', rendered)
+    rendered = re.sub(r'eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', '[REDACTED_JWT]', rendered)
+    return rendered or '{"detail": "No structured error details returned"}'
+
 def request(method,table,params=None,payload=None,upsert=False):
     h={'Prefer':'resolution=merge-duplicates,return=minimal'} if upsert else {}
     for i in range(4):
         try:
             r=SESSION.request(method,f'{URL}/rest/v1/{table}',params=params,json=payload,headers=h,timeout=90)
             if r.status_code in (429,500,502,503,504):
-                time.sleep(2**i);continue
-            r.raise_for_status()
+                if i==3:
+                    raise RuntimeError(f'Supabase {table}: HTTP {r.status_code}; error={_safe_api_error(r)}')
+                time.sleep(2**i)
+                continue
+            if r.status_code >= 400:
+                raise RuntimeError(f'Supabase {table}: HTTP {r.status_code}; error={_safe_api_error(r)}')
             return r.json() if method=='GET' else None
         except requests.RequestException as e:
-            if i==3:raise RuntimeError(f'Supabase {table} request failed: {e}') from e
+            if i==3:
+                raise RuntimeError(f'Supabase {table}: network error type={type(e).__name__}') from None
             time.sleep(2**i)
     raise RuntimeError('Supabase retry attempts exhausted for '+table)
 
